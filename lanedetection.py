@@ -1,0 +1,96 @@
+"""
+lane_detection.py
+
+Basic lane detection pipeline with bird’s-eye transform and lane center calculation.
+"""
+
+import cv2
+import numpy as np
+import argparse
+
+
+def detect_lane(image_path: str, show_results: bool = True):
+    # Load image
+    image = cv2.imread(image_path)
+    if image is None:
+        raise FileNotFoundError(f"Image not found: {image_path}")
+
+    height, width = image.shape[:2]
+
+    # Step 1: Preprocess (grayscale, blur, edges)
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, 50, 150)
+
+    # Step 2: Define region of interest (masking)
+    mask = np.zeros_like(edges)
+    polygon = np.array(
+        [
+            [
+                (0, height),
+                (width, height),
+                (int(width * 0.55), int(height * 0.6)),
+                (int(width * 0.45), int(height * 0.6)),
+            ]
+        ],
+        np.int32,
+    )
+    cv2.fillPoly(mask, polygon, 255)
+    masked = cv2.bitwise_and(edges, mask)
+
+    # Step 3: Perspective transform (bird’s-eye)
+    src_points = np.float32(
+        [
+            [int(width * 0.45), int(height * 0.6)],  # top-left
+            [int(width * 0.55), int(height * 0.6)],  # top-right
+            [width, height],  # bottom-right
+            [0, height],  # bottom-left
+        ]
+    )
+    dst_points = np.float32([[0, 0], [width, 0], [width, height], [0, height]])
+
+    M = cv2.getPerspectiveTransform(src_points, dst_points)
+    warped = cv2.warpPerspective(masked, M, (width, height))
+
+    # Step 4: Find lane pixels in warped image
+    histogram = np.sum(warped[warped.shape[0] // 2 :, :], axis=0)
+
+    # Find midpoint between left and right peaks
+    midpoint = np.int32(histogram.shape[0] // 2)
+    leftx = np.argmax(histogram[:midpoint])
+    rightx = np.argmax(histogram[midpoint:]) + midpoint
+    lane_center = (leftx + rightx) // 2
+
+    # Step 5: Draw centerline on bird’s-eye view
+    warped_color = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
+    cv2.line(warped_color, (lane_center, 0), (lane_center, height), (0, 0, 255), 3)
+    cv2.circle(warped_color, (lane_center, height - 50), 10, (255, 0, 0), -1)
+
+    # Step 6: Draw detected center point back on original image
+    Minv = cv2.getPerspectiveTransform(dst_points, src_points)  # inverse transform
+    center_point = np.array([[[lane_center, height - 50]]], dtype="float32")
+    orig_point = cv2.perspectiveTransform(center_point, Minv)[0][0]
+    output = np.copy(image)
+    cv2.circle(output, (int(orig_point[0]), int(orig_point[1])), 10, (0, 0, 255), -1)
+
+    if show_results:
+        cv2.imshow("ROI edges", masked)
+        cv2.imshow("Bird's-eye with lane center", warped_color)
+        cv2.imshow("Original with target point", output)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
+    return {
+        "lane_center_x": lane_center,
+        "original_target": (int(orig_point[0]), int(orig_point[1])),
+        "warped_image": warped_color,
+        "output_image": output,
+    }
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Lane detection with bird’s-eye view.")
+    parser.add_argument("image", type=str, help="Path to the input road image")
+    args = parser.parse_args()
+
+    detect_lane(args.image)

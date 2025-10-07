@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Custom path for Amiga robot: straight -> 180° anti-clockwise U-turn -> straight."""
+"""Custom path for Amiga robot: three parallel lanes with two 180° U-turns."""
 
 import argparse
 import asyncio
-from math import radians, sin, cos, ceil
+from math import radians, sin, cos, ceil, pi
 from pathlib import Path
 
 from farm_ng.core.event_client import EventClient
@@ -80,38 +80,120 @@ def create_arc_segment(
     return poses
 
 
+def correct_heading_at_point(pose: Pose3F64, target_yaw: float, frame_name: str) -> Pose3F64:
+    """Create a new pose with corrected heading while maintaining position."""
+    # Extract position from the pose
+    iso = pose.a_from_b
+    position = [iso.translation[0], iso.translation[1], iso.translation[2]]
+    
+    # Create new pose with exact target heading
+    corrected_pose = Pose3F64(
+        a_from_b=Isometry3F64(position, Rotation3F64.Rz(target_yaw)),
+        frame_a=pose.frame_a,
+        frame_b=frame_name,
+    )
+    return corrected_pose
+
+
+def get_yaw_from_pose(pose: Pose3F64) -> float:
+    """Extract yaw angle from a pose."""
+    rotation = pose.a_from_b.rotation
+    yaw = rotation.log()[2]  # Extract yaw from rotation
+    return yaw
+
+
 async def build_path(
     clients: dict[str, EventClient],
     straight_spacing: float,
     arc_spacing: float,
 ) -> Track:
-    """a1->b1->c1->d1 path with 180° anti-clockwise U-turn.
+    """a1->b1->c1->d1->e1->f1 path with two 180° anti-clockwise U-turns.
     
-    a1 -> 15m straight to b1
-    180° anti-clockwise U-turn from b1 to c1 (3m lateral displacement)
-    -> 15m straight from c1 to d1 (parallel to a1->b1)
+    Three parallel lanes connected by U-turns:
+    - a1 -> b1: 15m straight
+    - b1 -> c1: 180° U-turn (5.5m lateral)
+    - c1 -> d1: 15m straight (parallel to a1->b1)
+    - d1 -> e1: 180° U-turn (2.75m lateral)
+    - e1 -> f1: 15m straight (parallel to previous lanes)
     """
     world_pose_robot: Pose3F64 = await get_pose(clients)
     waypoints: list[Pose3F64] = [world_pose_robot]
     
+    # Store the initial heading (yaw) for later verification
+    initial_yaw = get_yaw_from_pose(world_pose_robot)
+    print(f"Initial heading at a1 (yaw): {initial_yaw:.4f} rad = {initial_yaw * 180 / pi:.2f} degrees")
+    print("=" * 70)
+    
+    # Segment 1: a1 -> b1
     print("a1->b1: 15m straight")
     waypoints += create_straight_segment(waypoints[-1], "point_b1", 15.0, spacing=straight_spacing)
     
-    print("Turn at b1: 180° anti-clockwise U-turn to reach c1 (3m lateral displacement)")
-    # For 180° arc with 3m separation, radius = 1.5m
-    turn_radius = 1.5
-    waypoints += create_arc_segment(
+    # U-turn 1: b1 -> c1 (5.5m lateral spacing)
+    print("\nTurn at b1: 180° anti-clockwise U-turn to reach c1 (5.5m lateral displacement)")
+    turn_radius_1 = 5.5 / 2.0  # radius = 2.75m
+    print(f"U-turn radius: {turn_radius_1}m")
+    arc_waypoints_1 = create_arc_segment(
         waypoints[-1], 
-        "point_c1", 
-        turn_radius, 
+        "point_c1_before_correction", 
+        turn_radius_1, 
         radians(180),  # Positive = left/anti-clockwise U-turn
         spacing=arc_spacing
     )
+    waypoints += arc_waypoints_1
     
-    print("c1->d1: 15m straight (parallel to a1->b1)")
+    # Correct heading at c1 to be exactly parallel (opposite direction)
+    target_yaw_at_c1 = initial_yaw + pi
+    print(f"Correcting heading at c1 to: {target_yaw_at_c1:.4f} rad = {target_yaw_at_c1 * 180 / pi:.2f} degrees")
+    c1_corrected = correct_heading_at_point(waypoints[-1], target_yaw_at_c1, "point_c1")
+    waypoints[-1] = c1_corrected
+    
+    # Segment 2: c1 -> d1
+    print("\nc1->d1: 15m straight (parallel to a1->b1)")
     waypoints += create_straight_segment(waypoints[-1], "point_d1", 15.0, spacing=straight_spacing)
     
+    # U-turn 2: d1 -> e1 (2.75m lateral spacing)
+    print("\nTurn at d1: 180° anti-clockwise U-turn to reach e1 (2.75m lateral displacement)")
+    turn_radius_2 = 2.75 / 2.0  # radius = 1.375m
+    print(f"U-turn radius: {turn_radius_2}m")
+    arc_waypoints_2 = create_arc_segment(
+        waypoints[-1], 
+        "point_e1_before_correction", 
+        turn_radius_2, 
+        radians(180),  # Positive = left/anti-clockwise U-turn
+        spacing=arc_spacing
+    )
+    waypoints += arc_waypoints_2
+    
+    # Correct heading at e1 to match original heading at a1
+    target_yaw_at_e1 = initial_yaw  # Back to original direction after two 180° turns
+    print(f"Correcting heading at e1 to: {target_yaw_at_e1:.4f} rad = {target_yaw_at_e1 * 180 / pi:.2f} degrees")
+    e1_corrected = correct_heading_at_point(waypoints[-1], target_yaw_at_e1, "point_e1")
+    waypoints[-1] = e1_corrected
+    
+    # Verify e1 heading matches a1 heading
+    e1_yaw = get_yaw_from_pose(waypoints[-1])
+    print(f"\n✓ VERIFICATION: Heading at e1: {e1_yaw:.4f} rad = {e1_yaw * 180 / pi:.2f} degrees")
+    print(f"✓ VERIFICATION: Heading at a1: {initial_yaw:.4f} rad = {initial_yaw * 180 / pi:.2f} degrees")
+    heading_diff = abs(e1_yaw - initial_yaw)
+    print(f"✓ VERIFICATION: Heading difference: {heading_diff:.6f} rad = {heading_diff * 180 / pi:.4f} degrees")
+    if heading_diff < 0.001:  # Within 0.001 radians (~0.057 degrees)
+        print("✓ SUCCESS: e1 heading matches a1 heading! Paths are perfectly parallel.")
+    else:
+        print(f"⚠ WARNING: Heading mismatch of {heading_diff * 180 / pi:.4f} degrees")
+    
+    # Segment 3: e1 -> f1
+    print("\ne1->f1: 15m straight (parallel to a1->b1 and c1->d1)")
+    waypoints += create_straight_segment(waypoints[-1], "point_f1", 15.0, spacing=straight_spacing)
+    
+    print("=" * 70)
     print(f"Total waypoints: {len(waypoints)}")
+    print(f"Path summary:")
+    print(f"  - Lane 1 (a1->b1): 15m")
+    print(f"  - U-turn 1 (b1->c1): 5.5m lateral, radius {turn_radius_1}m")
+    print(f"  - Lane 2 (c1->d1): 15m")
+    print(f"  - U-turn 2 (d1->e1): 2.75m lateral, radius {turn_radius_2}m")
+    print(f"  - Lane 3 (e1->f1): 15m")
+    
     return Track(waypoints=[p.to_proto() for p in waypoints])
 
 
@@ -120,7 +202,7 @@ async def stream_track_state(clients: dict[str, EventClient]) -> None:
     async for _, msg in clients["track_follower"].subscribe(SubscribeRequest(uri=Uri(path="/state"))):
         print(f"Track follower state: {msg.state}")
         if msg.state == TrackFollowerState.State.GOAL_REACHED:
-            print("Goal reached.")
+            print("Goal reached!")
             break
 
 
@@ -146,7 +228,7 @@ async def run(args) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Amiga path: 15m straight -> 180° anti-clockwise U-turn -> 15m straight")
+    parser = argparse.ArgumentParser(description="Amiga three-lane parallel path with two U-turns")
     parser.add_argument("--service-config", type=Path, required=True, help="EventServiceConfigList JSON")
     parser.add_argument("--straight-spacing", type=float, default=0.05, help="Waypoint spacing on straight segments (m)")
     parser.add_argument("--arc-spacing", type=float, default=0.1, help="Arc chord spacing along the arc length (m)")

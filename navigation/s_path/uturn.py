@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Custom path for Amiga robot: straight -> U-turn -> straight."""
+"""Custom path for Amiga robot: straight -> 180° anti-clockwise U-turn -> straight."""
 
 import argparse
 import asyncio
@@ -59,7 +59,7 @@ def create_arc_segment(
 ) -> list[Pose3F64]:
     """Discretize a constant-radius circular arc in the local frame.
 
-    Positive angle => left turn. Negative angle => right turn.
+    Positive angle => left turn (anti-clockwise). Negative angle => right turn (clockwise).
     The robot moves forward while its heading rotates by angle_rad.
     """
     assert radius > 0.0, "radius must be > 0"
@@ -80,36 +80,36 @@ def create_arc_segment(
     return poses
 
 
-async def build_abc_path(
+async def build_path(
     clients: dict[str, EventClient],
     straight_spacing: float,
     arc_spacing: float,
 ) -> Track:
-    """A->B->C->D path with smooth 180° U-turn.
+    """a1->b1->c1->d1 path with 180° anti-clockwise U-turn.
     
-    A -> 10m straight
-    180° arc (U-turn) from B to C (5m lateral displacement)
-    -> 10m straight from C to D
+    a1 -> 15m straight to b1
+    180° anti-clockwise U-turn from b1 to c1 (3m lateral displacement)
+    -> 15m straight from c1 to d1 (parallel to a1->b1)
     """
     world_pose_robot: Pose3F64 = await get_pose(clients)
     waypoints: list[Pose3F64] = [world_pose_robot]
     
-    print("A->B: 10m straight")
-    waypoints += create_straight_segment(waypoints[-1], "point_B", 10.0, spacing=straight_spacing)
+    print("a1->b1: 15m straight")
+    waypoints += create_straight_segment(waypoints[-1], "point_b1", 15.0, spacing=straight_spacing)
     
-    print("Turn at B: 180° U-turn to reach C (5m lateral displacement)")
-    # For 180° arc with 5m separation, radius = 2.5m
-    turn_radius = 2.5
+    print("Turn at b1: 180° anti-clockwise U-turn to reach c1 (3m lateral displacement)")
+    # For 180° arc with 3m separation, radius = 1.5m
+    turn_radius = 1.5
     waypoints += create_arc_segment(
         waypoints[-1], 
-        "point_C", 
+        "point_c1", 
         turn_radius, 
-        radians(-180),  # Negative = right/clockwise U-turn
+        radians(180),  # Positive = left/anti-clockwise U-turn
         spacing=arc_spacing
     )
     
-    print("C->D: 10m straight")
-    waypoints += create_straight_segment(waypoints[-1], "point_D", 10.0, spacing=straight_spacing)
+    print("c1->d1: 15m straight (parallel to a1->b1)")
+    waypoints += create_straight_segment(waypoints[-1], "point_d1", 15.0, spacing=straight_spacing)
     
     print(f"Total waypoints: {len(waypoints)}")
     return Track(waypoints=[p.to_proto() for p in waypoints])
@@ -135,7 +135,7 @@ async def run(args) -> None:
         if name not in clients:
             raise RuntimeError(f"No {name} service config in {args.service_config}")
 
-    track = await build_abc_path(
+    track = await build_path(
         clients,
         straight_spacing=args.straight_spacing,
         arc_spacing=args.arc_spacing,
@@ -146,7 +146,7 @@ async def run(args) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Amiga path: straight -> U-turn -> straight")
+    parser = argparse.ArgumentParser(description="Amiga path: 15m straight -> 180° anti-clockwise U-turn -> 15m straight")
     parser.add_argument("--service-config", type=Path, required=True, help="EventServiceConfigList JSON")
     parser.add_argument("--straight-spacing", type=float, default=0.05, help="Waypoint spacing on straight segments (m)")
     parser.add_argument("--arc-spacing", type=float, default=0.1, help="Arc chord spacing along the arc length (m)")
